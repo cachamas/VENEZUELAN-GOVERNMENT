@@ -120,7 +120,13 @@ function validate(body) {
 const BUDGET = { binding: 3500, resend: 5000, web3forms: 3000, formsubmit: 2500 };
 const GLOBAL_BUDGET_MS = 15000;
 
-function withDeadline(ms) {
+// Takes a TRANSPORT NAME, not a delay, and looks the budget up itself. It
+// originally took milliseconds and every call site passed a name instead, so
+// AbortSignal.timeout received "resend" and threw TypeError on every real
+// send. Bounded by the three validation paths returning before any transport
+// runs, which is why the health check stayed green while nothing could send.
+function withDeadline(name) {
+  const ms = BUDGET[name] || 3000;
   try {
     if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
       return { signal: AbortSignal.timeout(ms) };
@@ -145,7 +151,17 @@ async function bounded(name, fn) {
     ]);
     return r;
   } catch (e) {
-    return { ok: false, via: name, detail: String((e && e.message) || e).slice(0, 120) };
+    // An aborted fetch reports "The operation was aborted", which says nothing
+    // useful when you are trying to work out why a send failed. Both timeout
+    // paths - the AbortSignal and the race below - land here, so normalise.
+    const aborted = e && (e.name === "TimeoutError" || e.name === "AbortError");
+    return {
+      ok: false,
+      via: name,
+      detail: aborted
+        ? `timed out after ${BUDGET[name] || 3000}ms`
+        : String((e && e.message) || e).slice(0, 120),
+    };
   }
 }
 
@@ -276,7 +292,23 @@ async function viaFormSubmit(m) {
 
 /* -------------------------------- handler ------------------------------- */
 
-export async function onRequestPost({ request, env }) {
+export async function onRequestPost(ctx) {
+  try {
+    return await handlePost(ctx);
+  } catch (err) {
+    // Any unexpected throw used to escape as Cloudflare's own 502 page, which
+    // is indistinguishable from a delivery failure and carries none of the
+    // detail. Answer with a real body and log it to the Pages log instead, so
+    // a bug here is visible rather than mysterious.
+    console.error("[contact] unhandled", err && (err.stack || err.message || err));
+    return json(
+      { success: false, message: "relay error", detail: String((err && err.message) || err).slice(0, 200) },
+      500
+    );
+  }
+}
+
+async function handlePost({ request, env }) {
   let body;
   try {
     body = await request.json();
