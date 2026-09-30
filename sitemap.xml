@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The site is a single-page WebGL experience, so this is a short sitemap by
+  design. Only real, indexable documents are listed: every crawlable URL is
+  either the app itself or a standalone document. The room models, textures,
+  clips and audio are assets, not pages, and are deliberately absent.
+-->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
+
+  <url>
+    <loc>https://gov.info.ve/</loc>
+    <lastmod>2026-09-30</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>1.0</priority>
+    <image:image>
+      <image:loc>https://gov.info.ve/media/og.png</image:loc>
+      <image:title>VENEZUELAN GOVERNMENT (Artist)</image:title>
+    </image:image>
+  </url>
+
+</urlset>

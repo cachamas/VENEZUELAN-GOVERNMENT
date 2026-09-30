@@ -1,0 +1,32 @@
+{
+  "name": "VENEZUELAN GOVERNMENT (Artist)",
+  "short_name": "VG",
+  "description": "Portfolio for Net-Artist Alejandro Enrique.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#000000",
+  "theme_color": "#1f4ef8",
+  "categories": ["portfolio", "art", "graphics"],
+  "icons": [
+    {
+      "src": "/media/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/media/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/ico.webp",
+      "sizes": "512x512",
+      "type": "image/webp",
+      "purpose": "maskable"
+    }
+  ]
+}

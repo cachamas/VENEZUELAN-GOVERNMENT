@@ -1,0 +1,18 @@
+{
+  "name": "venezuelan-government-artist-portfolio",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Explorable WebGL portfolio for the Venezuelan Government project by Alejandro Enrique.",
+  "license": "SEE LICENSE IN LICENSE",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "serve": "python serve.py",
+    "smoke": "node smoke.js",
+    "cardvisible": "node cardvisible.js",
+    "diag": "node diag.js",
+    "crashlogtest": "node crashlogtest.js",
+    "fixmojibake": "node fixmojibake.js"
+  }
+}

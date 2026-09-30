@@ -1,0 +1,22 @@
+# robots.txt — https://gov.info.ve/
+#
+# Everything here is meant to be indexed. The only things excluded are the
+# dev-only harnesses at the repo root and the crash-log endpoint, neither of
+# which should ever appear in a search result.
+
+User-agent: *
+Allow: /
+Disallow: /__log
+Disallow: /smoke.js
+Disallow: /cardvisible.js
+Disallow: /diag.js
+Disallow: /crashlogtest.js
+Disallow: /fixmojibake.js
+Disallow: /serve.py
+Disallow: /tools/
+
+# The 404 document has noindex in its own head already; repeating it here is
+# just belt-and-braces so it can never be indexed as a real page.
+Disallow: /404.html
+
+Sitemap: https://gov.info.ve/sitemap.xml

@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#000000" />
+  <meta name="robots" content="noindex" />
+  <!-- Root-absolute on purpose. This document is served for ANY missing path,
+       so a relative URL would resolve against whatever directory the visitor
+       actually asked for: at /a/b/c the image would be fetched from
+       /a/b/c/media/404/404.webp and 404 again, leaving a broken image. If the
+       site is ever hosted under a sub-path, these three leading slashes are
+       the only thing that needs changing. -->
+  <link rel="icon" href="/ico.webp" type="image/webp" />
+  <title>404 Not found</title>
+  <style>
+    /* Standalone on purpose: a 404 has to render when the 3D bundle, the CDN
+       and the server are all unavailable, so nothing here is external. */
+    :root {
+      --safe-t: env(safe-area-inset-top, 0px);
+      --safe-r: env(safe-area-inset-right, 0px);
+      --safe-b: env(safe-area-inset-bottom, 0px);
+      --safe-l: env(safe-area-inset-left, 0px);
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background: #000000;
+      color: #ffffff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: calc(24px + var(--safe-t)) calc(24px + var(--safe-r))
+               calc(24px + var(--safe-b)) calc(24px + var(--safe-l));
+      -webkit-font-smoothing: antialiased;
+    }
+    main { display: flex; flex-direction: column; align-items: center; gap: clamp(18px, 4vmin, 34px); }
+    img {
+      display: block;
+      width: min(78vw, 420px);
+      height: auto;
+      /* the artwork is a flag being torn; it should not look pasted on */
+      filter: drop-shadow(0 18px 40px rgba(31, 78, 248, 0.35));
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(1.1rem, 1rem + 2.4vmin, 1.6rem);
+      font-weight: 500;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: #8b95a7;
+    }
+    /* A 404 with no way out is the one thing visitors reliably complain about,
+       so the route home is part of the page, not an afterthought. */
+    .home {
+      margin-top: clamp(6px, 1.5vmin, 14px);
+      display: inline-block;
+      padding: 0.7em 1.5em;
+      border: 1px solid #2f61ff;
+      border-radius: 2px;
+      color: #ffffff;
+      background: #1f4ef8;
+      font-size: clamp(0.62rem, 0.55rem + 0.5vmin, 0.75rem);
+      font-weight: 500;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      text-decoration: none;
+      transition: background-color 0.15s ease, transform 0.15s ease;
+    }
+    .home:hover, .home:focus-visible {
+      background: #2f61ff;
+      transform: translateY(-1px);
+    }
+    .home:focus-visible {
+      outline: 2px solid #ffffff;
+      outline-offset: 3px;
+    }
+    /* Respect a user who has asked the OS to cut animation. */
+    @media (prefers-reduced-motion: no-preference) {
+      img { animation: rise 900ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+      h1 { animation: fade 900ms 180ms ease both; }
+    }
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(14px) scale(0.98); }
+      to   { opacity: 1; transform: none; }
+    }
+    @keyframes fade {
+      from { opacity: 0; }
+      to   { opacity: 1; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <img src="/media/404/404.webp" width="512" height="400" alt="" decoding="async" />
+    <h1>404 Not found</h1>
+    <a class="home" href="/">Back to the site</a>
+  </main>
+</body>
+</html>

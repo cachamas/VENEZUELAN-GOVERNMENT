@@ -1,0 +1,81 @@
+Venezuelan Government (Artist) — Portfolio
+Copyright (c) 2019-2026 Alejandro Enrique
+
+This repository contains two very different kinds of work, and they are
+licensed separately. There is no single blanket license over everything here.
+
+================================================================================
+1. CODE — MIT License
+================================================================================
+
+Applies to the source code in this repository: everything under js/, css/,
+tools/, plus serve.py, 404.html, index.html, and the Node harnesses
+(smoke.js, cardvisible.js, diag.js, crashlogtest.js, fixmojibake.js).
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+================================================================================
+2. ARTWORK, MUSIC AND MODELS — All Rights Reserved
+================================================================================
+
+NOT covered by the MIT license above. NOT licensed under Creative Commons.
+NOT public domain. No permission is granted to copy, redistribute, modify,
+reuse, sublicense, train models on, or commercially exploit any of the
+following, in whole or in part, without prior written permission from the
+copyright holder:
+
+  media/textures/     655 texture files, 178 MB — all texture artwork
+  media/TORIS/        664 files, 24 MB — Toribash character texture sets
+  media/artwork/      25 works — paintings, murals and studies
+  media/models/       5 .glb models — MAIN, MUSIC, CLOTHES, TORIS, ART
+  media/MUSIC/        23 audio files — productions and the ambient bed
+  media/CONTACT/      photography and card imagery
+  media/ABOUT/        background images and reference material
+
+GACETA OFICIAL is a registered trademark. The trademark and any associated
+brand identity are excluded from both sections above.
+
+Why this split: the code is the portable part, and MIT lets anyone fork it and
+build on it. The artwork is the point of the site, and it stays his.
+
+================================================================================
+3. THIRD-PARTY CONTENT
+================================================================================
+
+Media under media/ABOUT/ includes locally saved copies of Wikipedia articles
+(Venezuelan Government (Artist)). Those files are licensed by Wikimedia
+Foundation under CC BY-SA 3.0 and are reproduced here unmodified. If you
+redistribute this repository you inherit and must satisfy the share-alike
+terms for those specific files.
+
+three.js and the DRACO decoder are loaded at runtime from a CDN and are not
+part of this repository. Both are MIT-licensed upstream by their respective
+authors.
+
+All other trademarks — Marvel, Star Wars, Team Fortress 2, Cartoon Network,
+Steven Universe, Homestuck, Valve, Hot Topic, For Fans By Fans and
+WeLoveFine — are the property of their respective owners and are referenced
+here only to describe past professional work. No affiliation or endorsement is
+implied by any of them.
+
+================================================================================
+
+Contact: dm@hombrechivo.com

@@ -1,0 +1,23 @@
+# crash reporter output, written by serve.py on every run
+crashlog.jsonl
+
+# node deps for the headless harnesses (smoke.js, cardvisible.js, diag.js,
+# crashlogtest.js). Only playwright-core, and only needed to run those.
+node_modules/
+
+# python bytecode
+__pycache__/
+*.py[cod]
+
+# ffmpeg pre-normalisation backups from tools/normalize_new.py
+*.mp3.orig
+
+# build intermediates
+tools/cues.json
+tools/_ambient_build.wav
+
+# 30.9 MB master clip. The site never loads it - the shipped version is the
+# 1-bit dot-matrix module js/videos/loading.js (53 KB brotli), generated from
+# this file by tools/video_to_dotmatrix.py. Keep the master locally; drop this
+# line if you would rather version the source alongside the site.
+media/LOADING INTRO/
