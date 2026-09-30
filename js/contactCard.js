@@ -137,7 +137,11 @@ const QR_PULSE_SECONDS = 1.7;  // total time of the 2 flashes
 /* ------------------------------------------------------------------ */
 
 const FORM_ENDPOINT = "/api/contact";
-const FORM_TIMEOUT_MS = 12000;         // hard, via AbortController
+// Must stay ABOVE the relay's GLOBAL_BUDGET_MS (12000) or the client abandons
+// the request before the server can explain what went wrong, and the visitor
+// gets a bare "timed out" instead of the real reason. 15s leaves headroom for
+// the round trip while still bounding the wait.
+const FORM_TIMEOUT_MS = 15000;
 const OUTBOX_KEY = "portfolio.contact.outbox.v1";
 
 // AbortSignal.timeout() is Safari 16.4+ / Chrome 103+. This site is opened on
@@ -173,11 +177,13 @@ function postForm(msg, honey) {
       if (r.status === 429) err.rateLimited = true;
       // No relay at this host: either it is not deployed yet, or you are on the
       // local serve.py, which cannot do POST at all and answers 501 (501 and 404
-      // both mean "no Pages Function here", 405 would mean "function is there but
-      // wants something other than POST"). Say so plainly instead of showing a
+      // both mean "no Pages Function here"). Say so plainly instead of showing a
       // bare status a visitor cannot act on.
       if (r.status === 404 || r.status === 501) err.noRelay = true;
-      if (r.status === 502) err.noRoute = true;
+      // "processed, but nothing delivered". The relay answers 200 for this on
+      // purpose: Cloudflare REPLACES the body of any 5xx with its own error
+      // page, which would throw away the per-transport reasons this needs.
+      if (res.delivered === false) err.noRoute = true;
       err.needsActivation = /activat/i.test(err.message);
       throw err;
     });

@@ -111,14 +111,15 @@ function validate(body) {
  * FormSubmit is last-resort and has been observed returning 522 and hanging
  * outright, so it gets the least: it can never dominate the response.
  *
- * The numbers must also add up. The per-transport budgets total 14 s, and the
- * GLOBAL_BUDGET below is checked between attempts so the function ALWAYS
- * returns a body. Cloudflare kills an unresponded request at 20 s and replaces
- * it with its own 502 page, which destroys the diagnostics as well as the
- * result - a 502 from this endpoint means "the function never finished", not
- * "delivery failed", and the two need to be told apart.                        */
-const BUDGET = { binding: 3500, resend: 5000, web3forms: 3000, formsubmit: 2500 };
-const GLOBAL_BUDGET_MS = 15000;
+ * The numbers must also add up, in BOTH directions. The per-transport budgets
+ * total 11.5s and GLOBAL_BUDGET_MS below is checked between attempts, so the
+ * function always returns a body. Cloudflare kills an unresponded request at
+ * 20s, but that is not the limit that matters: the CLIENT gives up at 15s, and
+ * if the server ran longer than that the visitor would be shown a bare
+ * "timed out" instead of the real per-transport explanation. Server global
+ * budget must therefore stay comfortably UNDER the client deadline.        */
+const BUDGET = { binding: 2500, resend: 4000, web3forms: 2500, formsubmit: 2500 };
+const GLOBAL_BUDGET_MS = 12000;
 
 // Takes a TRANSPORT NAME, not a delay, and looks the budget up itself. It
 // originally took milliseconds and every call site passed a name instead, so
@@ -355,15 +356,23 @@ async function handlePost({ request, env }) {
 
   // Nothing confirmed delivery. Say so — never a fake success. The client
   // keeps the message in its outbox and shows the visitor the address.
-  return json(
-    {
-      success: false,
-      message: "No delivery route accepted the message.",
-      configured: !!(env.RESEND_API_KEY || env.WEB3FORMS_KEY || env.MAIL),
-      attempted,
-    },
-    502
-  );
+  //
+  // HTTP 200, NOT 502, and that is deliberate. Cloudflare REPLACES the body of
+  // any 5xx with its own branded error page, which was measured: a 502 from
+  // here came back as {"cloudflare_error": true} and the attempted[] list below
+  // - the entire explanation of what went wrong - was gone. Answering 502 made
+  // the relay impossible to debug.
+  //
+  // 200 is also defensible on the merits: the request was received, validated
+  // and processed correctly; it was the upstream delivery that failed. That is
+  // carried in the body as delivered:false, which is what the client reads.
+  return json({
+    success: false,
+    delivered: false,
+    message: "No delivery route accepted the message.",
+    configured: !!(env.RESEND_API_KEY || env.WEB3FORMS_KEY || env.MAIL),
+    attempted,
+  });
 }
 
 // GET reports which transports are CONFIGURED - names only, never values or
