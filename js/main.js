@@ -4196,8 +4196,12 @@ if (artModal) {
 // The same meshes are the target for dynamic texture injection: injectTexture
 // swaps a live texture onto them (UVs are generated if the mesh shipped
 // without any), keeping the original map around so it can be restored.
+//
+// www is REQUIRED, not cosmetic: the apex (gacetaofficial.com) answers 522 -
+// origin unreachable - while www.gacetaofficial.com answers 200 in half a
+// second. Linking the apex sends visitors to a dead host.
 const OBJECT_LINKS = {
-  CLOTHES: { url: "https://gacetaofficial.com", names: ["GORRA", "GORRA2", "CLOTHES"] },
+  CLOTHES: { url: "https://www.gacetaofficial.com", names: ["GORRA", "GORRA2", "CLOTHES"] },
 };
 // the walking figure itself ("the armature") is also clickable; it gets 2
 // beacon pulses on scene entry and never highlights on hover

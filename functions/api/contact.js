@@ -24,24 +24,24 @@
 /*                                                                       */
 /*  TRANSPORTS, tried in order. First one that confirms delivery wins.    */
 /*                                                                       */
-/*    1. RESEND_API_KEY        Resend. Recommended: a real transactional  */
-/*                              provider with a real success/failure     */
-/*                              response. Free tier ~3000/month.          */
-/*    2. MAIL binding          Cloudflare's own send_email binding, via   */
-/*                              Email Routing. Native and free, but the  */
-/*                              destination must be a verified address    */
-/*                              in Email Routing settings.                */
+/*    1. MAIL binding          Cloudflare's own send_email binding, via     */
+/*                              Email Routing. Recommended when the domain  */
+/*                              is already on Cloudflare: native, no third  */
+/*                              party email company, no per-message cost.   */
+/*                              Setup steps are in viaBinding below.        */
+/*    2. RESEND_API_KEY        Resend. A real transactional provider with   */
+/*                              a real success/failure response. Free tier  */
+/*                              ~3000/month.                               */
 /*    3. WEB3FORMS_KEY         Browser-oriented free plan. NOTE: Web3Forms */
-/*                              rejects server-side POSTs on the free    */
-/*                              plan, so this only works on Pro. Left in  */
-/*                              for completeness, not relied on.          */
+/*                              rejects server-side POSTs on the free      */
+/*                              plan, so this only works on Pro. Left in    */
+/*                              for completeness, not relied on.            */
 /*    4. FormSubmit            Last resort. Its bot protection has been   */
 /*                              observed returning 1010 to non-browser    */
-/*                              origins.                                 */
+/*                              origins.                                  */
 /*                                                                       */
-/*  Set at least ONE of RESEND_API_KEY, WEB3FORMS_KEY, or a MAIL binding.  */
-/*  If none is configured the endpoint says so plainly instead of         */
-/*  pretending, and the client falls back to showing the address.         */
+/*  Configure at least one. With none set, the endpoint says so plainly   */
+/*  instead of pretending, and the client falls back to the address.     */
 /* ------------------------------------------------------------------ */
 
 const MAX_NAME = 120;
@@ -122,15 +122,66 @@ async function viaResend(env, m) {
   return { ok: true, via: "resend", id: body?.id || null };
 }
 
+/* Cloudflare's own send_email binding, via Email Routing.
+ *
+ * Setup, all in the Cloudflare dashboard for gov.info.ve:
+ *
+ *   1. Email -> Email Routing -> Get started. This needs the zone on
+ *      Cloudflare's nameservers, which it already is for Pages.
+ *   2. Routing rules -> Destination addresses -> Add. Add dm@gov.info.ve and
+ *      click the verification link that lands in that mailbox. Until this is
+ *      verified the binding below will not be able to send.
+ *   3. Routing rules -> Routes -> Create. Custom address `dm`, action
+ *      "Send to a verified email address", destination dm@gov.info.ve.
+ *      This makes ordinary mail to the address keep working, which matters
+ *      because it is the address the site advertises.
+ *   4. Workers & Pages -> your project -> Settings -> Functions -> Bindings.
+ *      Variable name `MAIL`, type "Send email", destination dm@gov.info.ve.
+ *
+ * The binding takes a full RFC 5322 message rather than a field bag, so the
+ * message is assembled here. From is pinned to the zone's own domain because
+ * Cloudflare rejects a From outside it, and Reply-To carries the visitor's
+ * address so hitting Reply on the delivered mail still works.            */
 async function viaBinding(env, m) {
   if (!env.MAIL || typeof env.MAIL.send !== "function") return null;
-  await env.MAIL.send({
-    from: env.MAIL_FROM || "Portfolio <noreply@gov.info.ve>",
-    to: env.MAIL_TO || "dm@gov.info.ve",
-    replyTo: m.email, // Workers uses replyTo; the REST shape is reply_to
-    subject: "Portfolio enquiry from " + m.name,
-    text: `From: ${m.name} <${m.email}>\n\n${m.message}`,
-  });
+
+  const from = env.MAIL_FROM || "Portfolio <noreply@gov.info.ve>";
+  const to = env.MAIL_TO || "dm@gov.info.ve";
+
+  // Header values must not contain raw newlines (injection), so fold to spaces.
+  const safe = (s) => String(s).replace(/[\r\n]+/g, " ").trim();
+  const boundary = "----pf" + Math.random().toString(36).slice(2, 12);
+
+  const mime = [
+    "From: " + from,
+    "To: " + to,
+    "Reply-To: " + safe(m.name) + " <" + safe(m.email) + ">",
+    "Subject: " + safe("Portfolio enquiry from " + m.name),
+    "MIME-Version: 1.0",
+    'Content-Type: multipart/alternative; boundary="' + boundary + '"',
+    "",
+    "--" + boundary,
+    'Content-Type: text/plain; charset="utf-8"',
+    "Content-Transfer-Encoding: base64",
+    "",
+    btoa(unescape(encodeURIComponent(
+      `From: ${m.name} <${m.email}>\n\n${m.message}\n`
+    ))),
+    "",
+    "--" + boundary,
+    'Content-Type: text/html; charset="utf-8"',
+    "Content-Transfer-Encoding: base64",
+    "",
+    btoa(unescape(encodeURIComponent(
+      `<p><strong>${esc(m.name)}</strong> &lt;${esc(m.email)}&gt;</p>` +
+      `<p style="white-space:pre-wrap">${esc(m.message)}</p>`
+    ))),
+    "",
+    "--" + boundary + "--",
+    "",
+  ].join("\r\n");
+
+  await env.MAIL.send(mime);
   return { ok: true, via: "cloudflare-email" };
 }
 
@@ -194,8 +245,8 @@ export async function onRequestPost({ request, env }) {
   if (v.error) return json({ success: false, message: v.error }, 400);
 
   const transports = [
+    () => viaBinding(env, v),      // Cloudflare Email Routing: native, free
     () => viaResend(env, v),
-    () => viaBinding(env, v),
     () => viaWeb3Forms(env, v),
     () => viaFormSubmit(v),
   ];
