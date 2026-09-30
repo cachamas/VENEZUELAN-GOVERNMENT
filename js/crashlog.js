@@ -39,16 +39,42 @@
 /*    - a normal reload or navigation, which fires pagehide and says bye.   */
 /*    - the very first load, before there is anything to compare against.    */
 /*                                                                       */
-/*  Everything is local: the log is appended to a file next to serve.py and  */
+/*  Everything is local: the log is appended to a file next to serve.py and   */
 /*  nothing leaves the machine. If the endpoint is missing (a deploy that   */
 /*  does not use this serve.py) every call here fails silently and the site  */
 /*  behaves exactly as it would with this file deleted.                      */
+/*                                                                       */
+/*  DEV-ONLY, AND NOW ENFORCED. This used to key off `?log=off`, which meant */
+/*  it was ON BY DEFAULT everywhere — including the public deploy, where    */
+/*  serve.py does not exist. Two things followed from that: the console     */
+/*  filled with `POST /__log 405` every 2 s, and every visitor was posting   */
+/*  their user agent, iOS version, core count, device memory, GPU string and */
+/*  screen size to a same-origin endpoint that did not want it.              */
+/*                                                                       */
+/*  It now requires a loopback or private-LAN hostname, which is what the  */
+/*  dev server and the phone-on-the-same-wifi case both are. On the real    */
+/*  domain it is off unconditionally and there is no query string that can  */
+/*  turn it back on from a visitor's browser.                               */
 /* ------------------------------------------------------------------ */
 
 const ENDPOINT = "/__log";
 const BEAT_MS = 2000;
 const KEY = "portfolio.crashlog.v1";
-const ENABLED = new URLSearchParams(location.search).get("log") !== "off";
+// loopback, a private-LAN range, or a .local/.localhost name.
+//
+// The IP alternatives are anchored at BOTH ends deliberately. An earlier
+// version used `^(127\.|10\.|192\.168\.|...)` which is a prefix pattern, but
+// wrapping it in ^...$ makes it demand the WHOLE hostname be "192." — so
+// 192.168.1.179 failed to match and the reporter silently stayed off on the
+// wifi address it exists for. Anchoring both ends is also what stops a public
+// host that merely begins with digits, like "10.evil.com", from qualifying.
+const IS_DEV_HOST = (function () {
+  var h = location.hostname;
+  if (h === "localhost" || h === "[::1]" || h === "::1") return true;
+  if (/\.local$/i.test(h) || /\.localhost$/i.test(h)) return true;
+  return /^(?:127\.\d{1,3}\.\d{1,3}\.\d{1,3}|0\.0\.0\.0|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})$/.test(h);
+})();
+const ENABLED = IS_DEV_HOST && new URLSearchParams(location.search).get("log") !== "off";
 
 let sessionId = "";
 let beatTimer = null;
@@ -266,7 +292,10 @@ function atDeathSnapshot() {
 
 export function initCrashLog() {
   if (!ENABLED) {
-    console.log("[crashlog] disabled (?log=off)");
+    // one quiet line, and only on a dev host — production says nothing at all
+    if (IS_DEV_HOST) {
+      console.log("[crashlog] disabled (?log=off)");
+    }
     return;
   }
   sessionId = "s" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);

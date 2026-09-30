@@ -1021,6 +1021,7 @@ var CONTACT_STRINGS = {
     fillErr: "Por favor completa todos los campos.",
     sending: "Enviando…",
     sent: "¡Mensaje enviado — gracias!",
+    needsActivation: "Formulario pendiente de activar: revisa el correo enviado a " + CONTACT_EMAIL + " y pulsa «Activar formulario». El mensaje no se entrega hasta entonces.",
     netErr: "No se pudo enviar ahora.",
   },
   en: {
@@ -1050,6 +1051,7 @@ var CONTACT_STRINGS = {
     fillErr: "Please fill in all fields.",
     sending: "Sending…",
     sent: "Message sent — thank you!",
+    needsActivation: "Form still needs activation: check the email sent to " + CONTACT_EMAIL + " and click “Activate Form”. Messages are not delivered until you do.",
     netErr: "Could not send right now.",
   },
 };
@@ -1457,6 +1459,7 @@ function submitContactForm(e) {
   e.preventDefault();
   var form = e.target;
   var status = document.getElementById("cc-status");
+  var altEl = document.getElementById("cc-alt");
   var send = document.getElementById("cc-send");
   var S = curStrings();
   var f = new FormData(form);
@@ -1474,6 +1477,8 @@ function submitContactForm(e) {
   }
   status.textContent = S.sending;
   status.className = "";
+  altEl.textContent = "";
+  altEl.style.display = "none";
   send.disabled = true;
   fetch(FORM_ENDPOINT, {
     method: "POST",
@@ -1485,19 +1490,33 @@ function submitContactForm(e) {
       return r.json();
     })
     .then(function (res) {
-      if (res && res.success === false) throw new Error(res.message || "form failed");
+      // FormSubmit returns the flag as a STRING — {"success":"false",...} — so
+      // the old `res.success === false` never matched, not even for a form that
+      // had not been activated yet. Every unactivated submit therefore fell
+      // through to the success branch and the page claimed "Message sent" while
+      // nothing had been delivered anywhere. Accept both shapes.
+      var ok = res && (res.success === true || res.success === "true");
+      if (!ok) {
+        var msg = String((res && res.message) || "form failed");
+        var e2 = new Error(msg);
+        e2.needsActivation = /activat/i.test(msg);
+        throw e2;
+      }
       status.textContent = S.sent;
       status.className = "";
+      altEl.textContent = "";
       form.querySelectorAll("input,textarea").forEach(function (el) {
         if (el.name !== "_honey") el.value = "";
       });
     })
     .catch(function (err) {
       console.warn("[contact] form error:", err);
-      status.textContent = err && err.message && err.message.indexOf("HTTP") === 0
-        ? S.netErr
-        : String(err.message || S.netErr).slice(0, 160);
+      var msg = String((err && err.message) || S.netErr).slice(0, 200);
+      status.textContent = (err && err.needsActivation) ? S.needsActivation : msg;
       status.className = "cc-err";
+      // never leave a visitor with a dead form and no way forward
+      altEl.innerHTML = '<a href="mailto:' + CONTACT_EMAIL + '">' + CONTACT_EMAIL + "</a>";
+      altEl.style.display = "";
     })
     .finally(function () { send.disabled = false; });
 }
