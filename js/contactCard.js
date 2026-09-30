@@ -101,15 +101,179 @@ const QR_PULSE_PEAK = 1.0;     // emissive intensity added at each flash peak
 const QR_PULSE_CYCLES = 2;     // number of flashes
 const QR_PULSE_SECONDS = 1.7;  // total time of the 2 flashes
 
-// contact form (no mailto): static-site-friendly FormSubmit AJAX endpoint
-// delivering straight to the portfolio inbox. One-time activation needed: the
-// owner opens the confirmation email FormSubmit sends on the first submit and
-// clicks "Activate Form" - until then every POST comes back
-// {"success":"false","message":"This form needs Activation..."} and no mail
-// is delivered. BOTH lines below must carry the same address, and it has to be
-// a real, deliverable mailbox: mail to a domain with no MX records is simply
-// lost, which also means the activation email never arrives.
-const FORM_ENDPOINT = "https://formsubmit.co/ajax/dm@gov.info.ve";
+/* ------------------------------------------------------------------ */
+/*  contact form — deliverable, and honest when it isn't.                */
+/*                                                                     */
+/*  HISTORY, because it explains every choice below.                     */
+/*                                                                     */
+/*  The original backend was FormSubmit's AJAX endpoint. Probing it      */
+/*  directly (a single POST, 90 s budget) never returned anything at    */
+/*  all — the socket just hung until the client gave up. That is the    */
+/*  "five minute MESSAGE SENT" this form used to show. It was not slow  */
+/*  delivery; there was no response to wait for.                        */
+/*                                                                     */
+/*  So the endpoint list below is tried IN ORDER with a hard per-        */
+/*  attempt timeout. The timeout is what makes the fallback reachable:  */
+/*  without it a hung primary means the backup is never tried.          */
+/*                                                                     */
+/*  PASTE YOUR WEB3FORMS KEY INTO accessKey to make that endpoint      */
+/*  live (free key from web3forms.com, no signup maze). Until then it   */
+/*  is skipped and FormSubmit is used alone.                            */
+/*                                                                     */
+/*  Nothing here reports success without a real success response. The   */
+/*  bug fixed one commit earlier was precisely the opposite: the flag   */
+/*  is returned as the STRING "false", the old `success === false` test */
+/*  never matched, and every unactivated submit cheerfully printed      */
+/*  "Message sent". Faking success is tempting because the alternative  */
+/*  is admitting a failure to a visitor - but the person on the other    */
+/*  end of this form may be commissioning work. A silently swallowed    */
+/*  enquiry is the most expensive thing this page can do, so the form   */
+/*  reports what actually happened and always offers the direct address.*/
+/* ------------------------------------------------------------------ */
+
+const WEB3FORMS_KEY = "";              // <- paste your key here
+const FORM_TIMEOUT_MS = 12000;         // per attempt; hard, via AbortController
+const OUTBOX_KEY = "portfolio.contact.outbox.v1";
+
+function formEndpoints() {
+  var list = [];
+  if (WEB3FORMS_KEY) {
+    list.push({
+      type: "web3forms",
+      url: "https://api.web3forms.com/submit",
+      build: function (m) {
+        return {
+          access_key: WEB3FORMS_KEY,
+          name: m.name,
+          email: m.email,
+          message: m.message,
+          subject: FORM_SUBJECT,
+          replyto: m.email,            // so Reply goes to the visitor
+          from_name: m.name,
+        };
+      },
+    });
+  }
+  list.push({
+    type: "formsubmit",
+    url: "https://formsubmit.co/ajax/" + CONTACT_EMAIL,
+    build: function (m) {
+      return {
+        name: m.name,
+        email: m.email,
+        message: m.message,
+        _subject: FORM_SUBJECT,
+        _template: "table",
+      };
+    },
+  });
+  return list;
+}
+
+// AbortSignal.timeout() is Safari 16.4+ / Chrome 103+. This site is opened on
+// phones and the manual fallback is two lines, so older iOS gets a real deadline
+// rather than a TypeError that would take the whole form down.
+function timeoutSignal(ms) {
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+    return AbortSignal.timeout(ms);
+  }
+  var c = new AbortController();
+  setTimeout(function () { c.abort(); }, ms);
+  return c.signal;
+}
+
+// One POST with a real deadline. AbortController is what turns FormSubmit's
+// indefinite hang into a bounded failure we can fall back from.
+function postTo(endpoint, msg) {
+  return fetch(endpoint.url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Accept": "application/json" },
+    body: JSON.stringify(endpoint.build(msg)),
+    signal: timeoutSignal(FORM_TIMEOUT_MS),
+  }).then(function (r) {
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  }).then(function (res) {
+    // Both backends spell the flag differently, and FormSubmit's is a STRING.
+    // Treat the presence of a truthy success as success and anything else as
+    // a failure carrying the backend's own explanation.
+    var ok = res && (res.success === true || res.success === "true");
+    if (ok) return res;
+    var err = new Error(String((res && res.message) || "form failed"));
+    err.needsActivation = /activat/i.test(err.message);
+    throw err;
+  });
+}
+
+// Try each endpoint in turn.
+//
+// Written as a recursive attempt rather than a reduce over a promise chain: a
+// reduce chain resolves to the LAST value, not to an array of them, so
+// collecting results that way ends with `results.length` on a single object.
+// This version also genuinely short-circuits — the moment one provider confirms
+// delivery, no further request is made, and an activation error stops the walk
+// because a different provider cannot fix "you have not activated this yet".
+function deliver(msg) {
+  var eps = formEndpoints();
+  var lastErr = null;
+  var i = 0;
+  function attempt() {
+    if (i >= eps.length) {
+      return Promise.reject(lastErr || new Error("no endpoint"));
+    }
+    var ep = eps[i++];
+    return postTo(ep, msg).catch(function (e) {
+      if (e && (e.name === "TimeoutError" || e.name === "AbortError")) {
+        // AbortError is what the manual AbortController fallback raises on old
+        // iOS; TimeoutError is what AbortSignal.timeout raises. Same meaning.
+        lastErr = new Error("timeout");
+        lastErr.timedOut = true;
+      } else {
+        lastErr = e;
+      }
+      if (lastErr && lastErr.needsActivation) throw lastErr;
+      return attempt();
+    });
+  }
+  return attempt();
+}
+
+/* --- outbox: a message that failed is KEPT, not thrown away --------------
+   The visitor may have closed the tab. Anything that did not get a real
+   success is parked in localStorage and retried on the next visit, so a
+   flaky backend cannot silently cost an enquiry. Cleared only on a
+   confirmed success.                                                           */
+
+function outboxRead() {
+  try {
+    var raw = localStorage.getItem(OUTBOX_KEY);
+    var arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr : [];
+  } catch (e) { return []; }
+}
+function outboxWrite(arr) {
+  try {
+    if (arr.length) localStorage.setItem(OUTBOX_KEY, JSON.stringify(arr.slice(-10)));
+    else localStorage.removeItem(OUTBOX_KEY);
+  } catch (e) { /* private mode */ }
+}
+function outboxPush(msg) {
+  var arr = outboxRead();
+  arr.push({ msg: msg, at: Date.now() });
+  outboxWrite(arr);
+}
+function retryOutbox() {
+  var arr = outboxRead();
+  if (!arr.length) return Promise.resolve(0);
+  return deliver(arr[0].msg).then(function () {
+    outboxWrite(arr.slice(1));
+    return retryOutbox();
+  }).catch(function () {
+    // still failing: stop, and keep the queue intact for next time
+    return 0;
+  });
+}
+
 const FORM_SUBJECT = "Portfolio contact";
 
 // direct contact details shown under the card and in the form
@@ -568,6 +732,9 @@ export function initContactCard(rend) {
   pivot.name = "CONTACT_CARD_PIVOT";
   rig.add(pivot);
   buildQuads();
+  // Flush anything a previous visit could not confirm. Fire-and-forget: this
+  // is background repair, and nothing the visitor is doing should wait on it.
+  retryOutbox();
 }
 
 export function ensureContactCard(cam) {
@@ -1022,6 +1189,7 @@ var CONTACT_STRINGS = {
     sending: "Enviando…",
     sent: "¡Mensaje enviado — gracias!",
     needsActivation: "Formulario pendiente de activar: revisa el correo enviado a " + CONTACT_EMAIL + " y pulsa «Activar formulario». El mensaje no se entrega hasta entonces.",
+    timedOut: "El servidor tardó demasiado y no respondió. He guardado tu mensaje para reintentarlo — si puedes, escríbeme directamente.",
     netErr: "No se pudo enviar ahora.",
   },
   en: {
@@ -1052,6 +1220,7 @@ var CONTACT_STRINGS = {
     sending: "Sending…",
     sent: "Message sent — thank you!",
     needsActivation: "Form still needs activation: check the email sent to " + CONTACT_EMAIL + " and click “Activate Form”. Messages are not delivered until you do.",
+    timedOut: "The server took too long and never replied. I have saved your message to retry — you can also email me directly below.",
     netErr: "Could not send right now.",
   },
 };
@@ -1463,45 +1632,32 @@ function submitContactForm(e) {
   var send = document.getElementById("cc-send");
   var S = curStrings();
   var f = new FormData(form);
-  var payload = {
+  var msg = {
     name: String(f.get("name") || "").trim(),
     email: String(f.get("email") || "").trim(),
     message: String(f.get("message") || "").trim(),
-    _subject: FORM_SUBJECT,
-    _template: "table",
   };
-  if (!payload.name || !payload.email || !payload.message) {
+  if (!msg.name || !msg.email || !msg.message) {
     status.textContent = S.fillErr;
     status.className = "cc-err";
     return;
   }
+  // Park it BEFORE the network call. If the tab dies mid-request, or the
+  // backend hangs and the visitor gives up, the message is already on disk and
+  // goes out on their next visit instead of vanishing.
+  outboxPush(msg);
+
   status.textContent = S.sending;
   status.className = "";
   altEl.textContent = "";
   altEl.style.display = "none";
   send.disabled = true;
-  fetch(FORM_ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Accept": "application/json" },
-    body: JSON.stringify(payload),
-  })
-    .then(function (r) {
-      if (!r.ok) throw new Error("HTTP " + r.status);
-      return r.json();
-    })
-    .then(function (res) {
-      // FormSubmit returns the flag as a STRING — {"success":"false",...} — so
-      // the old `res.success === false` never matched, not even for a form that
-      // had not been activated yet. Every unactivated submit therefore fell
-      // through to the success branch and the page claimed "Message sent" while
-      // nothing had been delivered anywhere. Accept both shapes.
-      var ok = res && (res.success === true || res.success === "true");
-      if (!ok) {
-        var msg = String((res && res.message) || "form failed");
-        var e2 = new Error(msg);
-        e2.needsActivation = /activat/i.test(msg);
-        throw e2;
-      }
+  deliver(msg)
+    .then(function () {
+      // only a CONFIRMED success reaches here. Nothing in this path invents
+      // one, which is the whole point: the previous version printed
+      // "Message sent" on failures and lost real enquiries.
+      outboxWrite(outboxRead().filter(function (x) { return x.msg !== msg; }));
       status.textContent = S.sent;
       status.className = "";
       altEl.textContent = "";
@@ -1510,11 +1666,13 @@ function submitContactForm(e) {
       });
     })
     .catch(function (err) {
-      console.warn("[contact] form error:", err);
-      var msg = String((err && err.message) || S.netErr).slice(0, 200);
-      status.textContent = (err && err.needsActivation) ? S.needsActivation : msg;
+      console.warn("[contact] form failed:", err);
+      if (err && err.needsActivation) status.textContent = S.needsActivation;
+      else if (err && err.timedOut) status.textContent = S.timedOut;
+      else status.textContent = String((err && err.message) || S.netErr).slice(0, 200);
       status.className = "cc-err";
-      // never leave a visitor with a dead form and no way forward
+      // The message is saved and will retry on the next visit, but never make
+      // a visitor depend on that: hand them the address, which always works.
       altEl.innerHTML = '<a href="mailto:' + CONTACT_EMAIL + '">' + CONTACT_EMAIL + "</a>";
       altEl.style.display = "";
     })
