@@ -98,6 +98,57 @@ function validate(body) {
 
 /* ------------------------------ transports ------------------------------ */
 
+/* Every transport gets its OWN deadline.
+ *
+ * This is not optional. Measured: with an unbounded chain, a single provider
+ * that hangs burned Cloudflare's entire 20 s edge budget and the request came
+ * back as Cloudflare's own 502 page - the function never got to answer, so the
+ * diagnostics it builds could not be read either. One slow provider was
+ * destroying the whole endpoint's ability to report anything.
+ *
+ * Budgets are deliberately uneven. Resend is a real transactional API and is
+ * expected to answer in well under a second, so it gets the most room.
+ * FormSubmit is last-resort and has been observed returning 522 and hanging
+ * outright, so it gets the least: it can never dominate the response.
+ *
+ * The numbers must also add up. The per-transport budgets total 14 s, and the
+ * GLOBAL_BUDGET below is checked between attempts so the function ALWAYS
+ * returns a body. Cloudflare kills an unresponded request at 20 s and replaces
+ * it with its own 502 page, which destroys the diagnostics as well as the
+ * result - a 502 from this endpoint means "the function never finished", not
+ * "delivery failed", and the two need to be told apart.                        */
+const BUDGET = { binding: 3500, resend: 5000, web3forms: 3000, formsubmit: 2500 };
+const GLOBAL_BUDGET_MS = 15000;
+
+function withDeadline(ms) {
+  try {
+    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+      return { signal: AbortSignal.timeout(ms) };
+    }
+  } catch (e) { /* fall through */ }
+  const c = new AbortController();
+  setTimeout(() => { try { c.abort(); } catch (e) {} }, ms);
+  return { signal: c.signal };
+}
+
+// Runs one transport and never lets it exceed its budget. Returns null when
+// the transport is not configured, which is different from failing.
+async function bounded(name, fn) {
+  try {
+    const r = await Promise.race([
+      fn(),
+      new Promise((_, rej) => setTimeout(() => {
+        const e = new Error("timed out after " + BUDGET[name] + "ms");
+        e.name = "TransportTimeout";
+        rej(e);
+      }, BUDGET[name] + 500)),
+    ]);
+    return r;
+  } catch (e) {
+    return { ok: false, via: name, detail: String((e && e.message) || e).slice(0, 120) };
+  }
+}
+
 async function viaResend(env, m) {
   if (!env.RESEND_API_KEY) return null;
   const r = await fetch("https://api.resend.com/emails", {
@@ -116,6 +167,7 @@ async function viaResend(env, m) {
         `<p><strong>${esc(m.name)}</strong> &lt;${esc(m.email)}&gt;</p>` +
         `<p style="white-space:pre-wrap">${esc(m.message)}</p>`,
     }),
+    ...withDeadline("resend"),
   });
   const body = await r.json().catch(() => ({}));
   if (!r.ok) return { ok: false, via: "resend", detail: body?.message || "HTTP " + r.status };
@@ -198,6 +250,7 @@ async function viaWeb3Forms(env, m) {
       subject: "Portfolio enquiry from " + m.name,
       message: m.message,
     }),
+    ...withDeadline("web3forms"),
   });
   const body = await r.json().catch(() => ({}));
   const ok = body && (body.success === true || body.success === "true");
@@ -213,6 +266,7 @@ async function viaFormSubmit(m) {
       name: m.name, email: m.email, message: m.message,
       _subject: "Portfolio enquiry", _template: "table",
     }),
+    ...withDeadline("formsubmit"),
   });
   const body = await r.json().catch(() => ({}));
   const ok = body && (body.success === true || body.success === "true");
@@ -245,25 +299,25 @@ export async function onRequestPost({ request, env }) {
   if (v.error) return json({ success: false, message: v.error }, 400);
 
   const transports = [
-    () => viaBinding(env, v),      // Cloudflare Email Routing: native, free
-    () => viaResend(env, v),
-    () => viaWeb3Forms(env, v),
-    () => viaFormSubmit(v),
+    ["binding",   () => viaBinding(env, v)],   // Cloudflare Email Routing: native, free
+    ["resend",    () => viaResend(env, v)],
+    ["web3forms", () => viaWeb3Forms(env, v)],
+    ["formsubmit", () => viaFormSubmit(v)],
   ];
 
   const attempted = [];
-  for (const run of transports) {
-    let result;
-    try {
-      result = await run();
-    } catch (e) {
-      attempted.push({ via: "error", detail: String(e && e.message || e).slice(0, 120) });
-      continue;
+  const startedAt = Date.now();
+  for (const [name, run] of transports) {
+    // Stop trying the moment the global budget is spent. Whatever has been
+    // learned so far still gets reported.
+    const spent = Date.now() - startedAt;
+    if (spent > GLOBAL_BUDGET_MS) {
+      attempted.push({ via: name, detail: "skipped: global time budget spent" });
+      break;
     }
-    if (result === null) continue; // transport not configured
-    if (result.ok) {
-      return json({ success: true, via: result.via });
-    }
+    const result = await bounded(name, run);
+    if (result === null) continue;                 // not configured, skip silently
+    if (result.ok) return json({ success: true, via: result.via });
     attempted.push({ via: result.via, detail: result.detail });
   }
 
@@ -280,7 +334,25 @@ export async function onRequestPost({ request, env }) {
   );
 }
 
-// Anything other than POST is a client mistake, not a delivery failure.
+// GET reports which transports are CONFIGURED - names only, never values or
+// any part of a key. The relay was undebuggable while it could only fail: the
+// 502 edge error replaced the function's own answer, so the attempted[] list it
+// builds was never readable. This is the read-only way to answer "is the key
+// actually set?" without sending mail.
+export async function onRequestGet({ env }) {
+  return json({
+    ok: true,
+    transports: {
+      "cloudflare-email": !!(env.MAIL && typeof env.MAIL.send === "function"),
+      resend: !!env.RESEND_API_KEY,
+      web3forms: !!env.WEB3FORMS_KEY,
+      formsubmit: true, // always available, which is why it is last
+    },
+    mail_to: env.MAIL_TO || "dm@gov.info.ve (default)",
+    mail_from: env.MAIL_FROM || "noreply@gov.info.ve (default)",
+  });
+}
+
 export async function onRequest() {
-  return json({ success: false, message: "POST required" }, 405);
+  return json({ success: false, message: "GET returns config status; POST sends" }, 405);
 }
