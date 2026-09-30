@@ -102,73 +102,43 @@ const QR_PULSE_CYCLES = 2;     // number of flashes
 const QR_PULSE_SECONDS = 1.7;  // total time of the 2 flashes
 
 /* ------------------------------------------------------------------ */
-/*  contact form — deliverable, and honest when it isn't.                */
-/*                                                                     */
-/*  HISTORY, because it explains every choice below.                     */
-/*                                                                     */
-/*  The original backend was FormSubmit's AJAX endpoint. Probing it      */
-/*  directly (a single POST, 90 s budget) never returned anything at    */
-/*  all — the socket just hung until the client gave up. That is the    */
-/*  "five minute MESSAGE SENT" this form used to show. It was not slow  */
-/*  delivery; there was no response to wait for.                        */
-/*                                                                     */
-/*  So the endpoint list below is tried IN ORDER with a hard per-        */
-/*  attempt timeout. The timeout is what makes the fallback reachable:  */
-/*  without it a hung primary means the backup is never tried.          */
-/*                                                                     */
-/*  PASTE YOUR WEB3FORMS KEY INTO accessKey to make that endpoint      */
-/*  live (free key from web3forms.com, no signup maze). Until then it   */
-/*  is skipped and FormSubmit is used alone.                            */
-/*                                                                     */
-/*  Nothing here reports success without a real success response. The   */
-/*  bug fixed one commit earlier was precisely the opposite: the flag   */
-/*  is returned as the STRING "false", the old `success === false` test */
-/*  never matched, and every unactivated submit cheerfully printed      */
-/*  "Message sent". Faking success is tempting because the alternative  */
-/*  is admitting a failure to a visitor - but the person on the other    */
-/*  end of this form may be commissioning work. A silently swallowed    */
-/*  enquiry is the most expensive thing this page can do, so the form   */
-/*  reports what actually happened and always offers the direct address.*/
+/*  contact form — same-origin relay, and honest when it is not.         */
+/*                                                                       */
+/*  WHY THERE IS NO formsubmit.co OR web3forms.com IN THIS FILE          */
+/*                                                                       */
+/*  The form used to POST straight from the browser to a third-party      */
+/*  form host. That put every delivery behind someone else's CORS policy   */
+/*  and bot protection, and neither was reliable.                        */
+/*                                                                       */
+/*  A cross-origin POST needs an Access-Control-Allow-Origin header, so  */
+/*  when that host stops sending one the browser blocks it and the form  */
+/*  is dead with nothing fixable in this repo. There is also nothing to   */
+/*  whitelist: FormSubmit requires no registration and has no account,    */
+/*  so there is no settings page on which to allow-list gov.info.ve.      */
+/*                                                                       */
+/*  And it was never actually CORS. Every route on formsubmit.co was     */
+/*  returning Cloudflare 522 - origin unreachable - during testing,      */
+/*  which is what the "five minute MESSAGE SENT" was. A 522 sits and      */
+/*  retries below TLS before it surfaces, so the stall looked like slow  */
+/*  delivery and was really a dead server.                               */
+/*                                                                       */
+/*  The endpoint below is /api/contact, a Cloudflare Pages Function on    */
+/*  the SAME origin as this page. Same-origin means the browser never     */
+/*  runs a cross-origin request, so CORS is not consulted at all, and    */
+/*  the provider API keys live in server-side environment variables       */
+/*  instead of being shipped to every visitor. See functions/api/         */
+/*  contact.js for the transports it tries.                              */
+/*                                                                       */
+/*  The timeout stays because a hung relay is still possible, and the    */
+/*  outbox stays because a visitor must never lose an enquiry. Nothing    */
+/*  here reports success without a real success response: the bug fixed   */
+/*  two commits earlier was exactly that, and the person on the other    */
+/*  end of this form may be commissioning work.                           */
 /* ------------------------------------------------------------------ */
 
-const WEB3FORMS_KEY = "";              // <- paste your key here
-const FORM_TIMEOUT_MS = 12000;         // per attempt; hard, via AbortController
+const FORM_ENDPOINT = "/api/contact";
+const FORM_TIMEOUT_MS = 12000;         // hard, via AbortController
 const OUTBOX_KEY = "portfolio.contact.outbox.v1";
-
-function formEndpoints() {
-  var list = [];
-  if (WEB3FORMS_KEY) {
-    list.push({
-      type: "web3forms",
-      url: "https://api.web3forms.com/submit",
-      build: function (m) {
-        return {
-          access_key: WEB3FORMS_KEY,
-          name: m.name,
-          email: m.email,
-          message: m.message,
-          subject: FORM_SUBJECT,
-          replyto: m.email,            // so Reply goes to the visitor
-          from_name: m.name,
-        };
-      },
-    });
-  }
-  list.push({
-    type: "formsubmit",
-    url: "https://formsubmit.co/ajax/" + CONTACT_EMAIL,
-    build: function (m) {
-      return {
-        name: m.name,
-        email: m.email,
-        message: m.message,
-        _subject: FORM_SUBJECT,
-        _template: "table",
-      };
-    },
-  });
-  return list;
-}
 
 // AbortSignal.timeout() is Safari 16.4+ / Chrome 103+. This site is opened on
 // phones and the manual fallback is two lines, so older iOS gets a real deadline
@@ -182,60 +152,42 @@ function timeoutSignal(ms) {
   return c.signal;
 }
 
-// One POST with a real deadline. AbortController is what turns FormSubmit's
-// indefinite hang into a bounded failure we can fall back from.
-function postTo(endpoint, msg) {
-  return fetch(endpoint.url, {
+// One same-origin POST with a real deadline. The status is mapped to a flag the
+// UI can distinguish, because a bare "HTTP 502" tells a visitor nothing.
+function postForm(msg, honey) {
+  return fetch(FORM_ENDPOINT, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Accept": "application/json" },
-    body: JSON.stringify(endpoint.build(msg)),
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    credentials: "same-origin",
+    body: JSON.stringify({
+      name: msg.name,
+      email: msg.email,
+      message: msg.message,
+      company: honey || "",        // honeypot: must stay empty for a real person
+    }),
     signal: timeoutSignal(FORM_TIMEOUT_MS),
   }).then(function (r) {
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    return r.json();
-  }).then(function (res) {
-    // Both backends spell the flag differently, and FormSubmit's is a STRING.
-    // Treat the presence of a truthy success as success and anything else as
-    // a failure carrying the backend's own explanation.
-    var ok = res && (res.success === true || res.success === "true");
-    if (ok) return res;
-    var err = new Error(String((res && res.message) || "form failed"));
-    err.needsActivation = /activat/i.test(err.message);
-    throw err;
+    return r.json().catch(function () { return {}; }).then(function (res) {
+      if (r.ok && (res.success === true || res.success === "true")) return res;
+      var err = new Error(String(res.message || "HTTP " + r.status));
+      if (r.status === 429) err.rateLimited = true;
+      // No relay at this host: either it is not deployed yet, or you are on the
+      // local serve.py, which cannot do POST at all and answers 501 (501 and 404
+      // both mean "no Pages Function here", 405 would mean "function is there but
+      // wants something other than POST"). Say so plainly instead of showing a
+      // bare status a visitor cannot act on.
+      if (r.status === 404 || r.status === 501) err.noRelay = true;
+      if (r.status === 502) err.noRoute = true;
+      err.needsActivation = /activat/i.test(err.message);
+      throw err;
+    });
   });
 }
 
-// Try each endpoint in turn.
-//
-// Written as a recursive attempt rather than a reduce over a promise chain: a
-// reduce chain resolves to the LAST value, not to an array of them, so
-// collecting results that way ends with `results.length` on a single object.
-// This version also genuinely short-circuits — the moment one provider confirms
-// delivery, no further request is made, and an activation error stops the walk
-// because a different provider cannot fix "you have not activated this yet".
-function deliver(msg) {
-  var eps = formEndpoints();
-  var lastErr = null;
-  var i = 0;
-  function attempt() {
-    if (i >= eps.length) {
-      return Promise.reject(lastErr || new Error("no endpoint"));
-    }
-    var ep = eps[i++];
-    return postTo(ep, msg).catch(function (e) {
-      if (e && (e.name === "TimeoutError" || e.name === "AbortError")) {
-        // AbortError is what the manual AbortController fallback raises on old
-        // iOS; TimeoutError is what AbortSignal.timeout raises. Same meaning.
-        lastErr = new Error("timeout");
-        lastErr.timedOut = true;
-      } else {
-        lastErr = e;
-      }
-      if (lastErr && lastErr.needsActivation) throw lastErr;
-      return attempt();
-    });
-  }
-  return attempt();
+// A single endpoint now, so "deliver" is just "post, once" - but it stays a
+// function so the retry and outbox paths have one thing to call.
+function deliver(msg, honey) {
+  return postForm(msg, honey);
 }
 
 /* --- outbox: a message that failed is KEPT, not thrown away --------------
@@ -1190,6 +1142,9 @@ var CONTACT_STRINGS = {
     sent: "¡Mensaje enviado — gracias!",
     needsActivation: "Formulario pendiente de activar: revisa el correo enviado a " + CONTACT_EMAIL + " y pulsa «Activar formulario». El mensaje no se entrega hasta entonces.",
     timedOut: "El servidor tardó demasiado y no respondió. He guardado tu mensaje para reintentarlo — si puedes, escríbeme directamente.",
+    noRelay: "Este formulario solo funciona en el sitio publicado — no hay servidor de correo en esta dirección.",
+    rateLimited: "Demasiados mensajes desde esta dirección. Espera unos minutos e inténtalo de nuevo.",
+    noRoute: "No pude entregar el mensaje por ningún canal. He guardado tu mensaje; si puedes, escríbeme directamente.",
     netErr: "No se pudo enviar ahora.",
   },
   en: {
@@ -1221,6 +1176,9 @@ var CONTACT_STRINGS = {
     sent: "Message sent — thank you!",
     needsActivation: "Form still needs activation: check the email sent to " + CONTACT_EMAIL + " and click “Activate Form”. Messages are not delivered until you do.",
     timedOut: "The server took too long and never replied. I have saved your message to retry — you can also email me directly below.",
+    noRelay: "This form only works on the published site — there is no mail server at this address.",
+    rateLimited: "Too many messages from this address. Wait a few minutes and try again.",
+    noRoute: "I could not deliver the message by any channel. It is saved; you can also email me directly below.",
     netErr: "Could not send right now.",
   },
 };
@@ -1642,6 +1600,10 @@ function submitContactForm(e) {
     status.className = "cc-err";
     return;
   }
+  // the hidden honeypot input must stay empty; the relay drops the message if
+  // it is filled, and answers as though it worked
+  var honey = String(f.get("_honey") || "").trim();
+
   // Park it BEFORE the network call. If the tab dies mid-request, or the
   // backend hangs and the visitor gives up, the message is already on disk and
   // goes out on their next visit instead of vanishing.
@@ -1652,7 +1614,7 @@ function submitContactForm(e) {
   altEl.textContent = "";
   altEl.style.display = "none";
   send.disabled = true;
-  deliver(msg)
+  deliver(msg, honey)
     .then(function () {
       // only a CONFIRMED success reaches here. Nothing in this path invents
       // one, which is the whole point: the previous version printed
@@ -1667,7 +1629,10 @@ function submitContactForm(e) {
     })
     .catch(function (err) {
       console.warn("[contact] form failed:", err);
-      if (err && err.needsActivation) status.textContent = S.needsActivation;
+      if (err && err.noRelay) status.textContent = S.noRelay;
+      else if (err && err.rateLimited) status.textContent = S.rateLimited;
+      else if (err && err.noRoute) status.textContent = S.noRoute;
+      else if (err && err.needsActivation) status.textContent = S.needsActivation;
       else if (err && err.timedOut) status.textContent = S.timedOut;
       else status.textContent = String((err && err.message) || S.netErr).slice(0, 200);
       status.className = "cc-err";
