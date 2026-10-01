@@ -71,6 +71,9 @@ const FLIP_V = true;        // authored face renders mirrored vertically; flip t
 // then spins to the QR side over INTRO_FLIP_TIME
 const INTRO_BACK_TIME = 4.0;
 const INTRO_FLIP_TIME = 0.8;
+// How long the card will sit unrevealed waiting for its own artwork before it
+// opens on the GLB's baked texture anyway. See the reveal gate in loadCard().
+const TEXTURE_REVEAL_TIMEOUT = 5;
 // idle auto-rotate: after IDLE_AUTO_DELAY seconds without manipulation the
 // card slowly revolves on Y (IDLE_AUTO_SPEED rad/s) to show both faces
 const IDLE_AUTO_DELAY = 2.0;
@@ -423,6 +426,42 @@ function applyPose() {
 
 function cardLive() { return state === S.OPEN || state === S.ZOOMED; }
 
+// Keep an angle in (-PI, PI]. Needed because a mid-intro grab now folds the
+// remaining intro flip into rotY (see the pointerdown handler), and without a
+// wrap that would add up to a full half-turn every time someone catches the
+// back face. Wrapping by 2*PI is visually a no-op - it lands on the same
+// orientation - so this only stops the number growing without bound.
+function wrapAngle(a) {
+  a = a % (Math.PI * 2);
+  if (a > Math.PI) a -= Math.PI * 2;
+  else if (a <= -Math.PI) a += Math.PI * 2;
+  return a;
+}
+
+// Hand the intro's remaining flip to the drag, instead of throwing it away.
+//
+// The intro holds the BACK face for INTRO_BACK_TIME (4s) with introFlip pinned
+// at 1, then decays it to 0 over INTRO_FLIP_TIME. applyPose() adds
+// `Math.PI * introFlip` to the pivot's Y rotation, so during that hold the
+// card sits a full 180 degrees around from the QR side.
+//
+// Zeroing introFlip on grab - which is what this used to do - therefore yanked
+// the card through that 180 degrees in a single frame. Catching the back face
+// during the hold, which is the most natural thing to do, produced a visible
+// snap to the front that had nothing to do with where the finger went.
+//
+// Moving the remaining angle into rotY instead leaves the total Y rotation
+// exactly as it was, so the pose does not change on the frame of the grab and
+// the drag/physics simply continues from the angle the card was already at.
+// The flip animation is genuinely abandoned rather than fast-forwarded: the
+// card stays where the visitor put it, and the idle revolve takes over from
+// there.
+function absorbIntroFlip() {
+  if (introFlip <= 0) return;
+  rotY = wrapAngle(rotY + Math.PI * introFlip);
+  introFlip = 0;
+}
+
 // Distance that frames the card. Two constraints compete:
 //   height — the card fills FIT_FRAC of the window height (the desktop rule)
 //   width  — on a portrait phone the card is much wider than it is tall, so
@@ -501,11 +540,18 @@ function setupCardLighting() {
   cardScene.add(new THREE.AmbientLight(0xffffff, CARD_AMBIENT_INTENSITY));
 }
 
-function switchCardTexture() {
-  if (!cardMat) return;
+function switchCardTexture(onSettled) {
+  if (!cardMat) { if (onSettled) onSettled(); return; }
   const t = cardTexturePaths();
   const key = (t.map + "|" + t.normal);
-  if (texCache.key === key) return;
+  // already holding exactly this design: nothing to wait for
+  if (texCache.key === key) { if (onSettled) onSettled(); return; }
+  let settled = false;
+  const settle = function () {
+    if (settled) return;
+    settled = true;
+    if (onSettled) onSettled();
+  };
   new THREE.TextureLoader().load(t.map, function (tex) {
     tex.colorSpace = THREE.SRGBColorSpace;
     if (cardMat.map) cardMat.map.dispose();
@@ -513,6 +559,11 @@ function switchCardTexture() {
     flipV(tex);
     cardMat.needsUpdate = true;
     texCache.map = tex;
+    settle();
+  }, undefined, function () {
+    // a failed design must not strand the caller waiting forever
+    console.warn("[contact] design texture failed:", t.map);
+    settle();
   });
   new THREE.TextureLoader().load(t.normal, function (tex) {
     if (cardMat.normalMap) cardMat.normalMap.dispose();
@@ -637,16 +688,43 @@ function loadCard() {
       pivot.add(wrapper);
       setupCardLighting();
       pickCardIndex();
-      switchCardTexture();
-      loaded = true;
-      console.log("[contact] card ready h=" + modelHeight.toFixed(3) + " w=" + modelWidth.toFixed(3) +
-        " (raw box " + rawX.toFixed(3) + "x" + rawY.toFixed(3) + "x" + rawZ.toFixed(3) + ")" +
-        " liftY=" + liftY.toFixed(3) +
-        " alignY=" + baseAlignY.toFixed(3) + " qrShiftY=" + qrShiftY.toFixed(3));
-      if (pendingOpen) {
-        pendingOpen = false;
-        startOpening();
-      }
+
+      // THE REVEAL WAITS FOR THE DESIGN.
+      //
+      // `loaded = true` used to fire here, the moment the GLB arrived, so the
+      // card became visible wearing whatever texture is baked into contact.glb
+      // while the real, randomly-chosen design was still downloading as a
+      // separate request. Measured cold at 3 Mbit/s: on screen from 11.5s, the
+      // intended design not live until 37.8s - 26 seconds of the wrong face.
+      // On a fast machine that same window is the "half a second of weird
+      // texture" that reads like a UV glitch; on a phone it can easily outlast
+      // the visit, which is why it looked like the flip never corrected.
+      //
+      // So the card is not revealed until its own artwork is actually applied.
+      // It can never wait forever though: a 404, a dropped connection or a
+      // wedged image decode falls through to the baked texture after
+      // TEXTURE_REVEAL_TIMEOUT, because a card that refuses to open is worse
+      // than a card that opens on the wrong picture.
+      let revealed = false;
+      const reveal = function () {
+        if (revealed) return;
+        revealed = true;
+        clearTimeout(revealTimer);
+        loaded = true;
+        console.log("[contact] card ready h=" + modelHeight.toFixed(3) + " w=" + modelWidth.toFixed(3) +
+          " (raw box " + rawX.toFixed(3) + "x" + rawY.toFixed(3) + "x" + rawZ.toFixed(3) + ")" +
+          " liftY=" + liftY.toFixed(3) +
+          " alignY=" + baseAlignY.toFixed(3) + " qrShiftY=" + qrShiftY.toFixed(3));
+        if (pendingOpen) {
+          pendingOpen = false;
+          startOpening();
+        }
+      };
+      const revealTimer = setTimeout(function () {
+        console.warn("[contact] design texture slow or unavailable; revealing on the baked texture");
+        reveal();
+      }, TEXTURE_REVEAL_TIMEOUT * 1000);
+      switchCardTexture(reveal);
     },
     undefined,
     function (err) {
@@ -690,6 +768,21 @@ export function initContactCard(rend) {
   pivot.name = "CONTACT_CARD_PIVOT";
   rig.add(pivot);
   buildQuads();
+  // WARM THE CARD NOW, not when it is first clicked.
+  //
+  // loadCard() used to be reached only through openContactCard(), so the very
+  // first tap on CONTACT started a 462 KB GLB download and then, once that
+  // arrived, a SECOND round trip for the design textures (452 KB of webp). Two
+  // sequential fetches, both started at the moment of the click, both competing
+  // with the 10.7 MB MAIN scene. Measured cold at 3 Mbit/s that left the card
+  // waiting ~30 s for artwork it needed before it could be revealed.
+  //
+  // Starting it here overlaps that with the room loading instead, so by the
+  // time anyone clicks CONTACT the geometry and the artwork are usually
+  // already in. It is a background fetch: loadCard() is fire-and-forget and
+  // sets loaded/pendingOpen itself, so a visitor who clicks during the load
+  // still waits for it rather than getting an empty card.
+  if (!wrapper) loadCard();
   // Flush anything a previous visit could not confirm. Fire-and-forget: this
   // is background repair, and nothing the visitor is doing should wait on it.
   retryOutbox();
@@ -971,6 +1064,17 @@ export function contactDebug() {
     dur: dur,
     rotY: +rotY.toFixed(3),
     rotX: +rotX.toFixed(3),
+    // The three angles that sum into the pivot's Y, kept separate because the
+    // intro hand-off in absorbIntroFlip() moves value between them, and "the
+    // card jumped" is only diagnosable if you can see which term moved.
+    introFlip: +introFlip.toFixed(4),
+    introTimer: +introTimer.toFixed(3),
+    autoY: +autoY.toFixed(3),
+    returnFront: returnFront,
+    dragId: dragId,
+    // what the viewer actually sees, and what a grab must not change
+    pivotY: pivot ? +pivot.rotation.y.toFixed(4) : null,
+    pivotX: pivot ? +pivot.rotation.x.toFixed(4) : null,
     tilt: [+tiltX.toFixed(3), +tiltY.toFixed(3)],
     alignY: +baseAlignY.toFixed(3),
     qrShiftY: +qrShiftY.toFixed(3),
@@ -986,6 +1090,40 @@ export function contactDebug() {
     pos: pivot ? [pivot.position.x, pivot.position.y, pivot.position.z].map(function (n) { return +n.toFixed(3); }) : null,
     mat: cardMat ? cardMat.type : null,
     hasMap: !!(cardMat && cardMat.map),
+    // Which texture is actually on the card right now, and is it flipped?
+    // flipV() mutates repeat/offset, which are per-TEXTURE, not per-material,
+    // and glTF hands the same texture object to more than one slot - so "the
+    // card is mirrored" can only be diagnosed by naming the texture that is
+    // live and reading its own transform.
+    mapState: cardMat && cardMat.map ? {
+      file: (cardMat.map.image && (cardMat.map.image.currentSrc || cardMat.map.image.src) || "").split("/").pop().slice(0, 40),
+      uuid: cardMat.map.uuid.slice(0, 8),
+      repeatY: +cardMat.map.repeat.y.toFixed(3),
+      offsetY: +cardMat.map.offset.y.toFixed(3),
+      flipY: cardMat.map.flipY,
+      wanted: cardTexturePaths().map.split("/").pop(),
+    } : null,
+    normalState: cardMat && cardMat.normalMap ? {
+      file: (cardMat.normalMap.image && (cardMat.normalMap.image.currentSrc || cardMat.normalMap.image.src) || "").split("/").pop().slice(0, 40),
+      uuid: cardMat.normalMap.uuid.slice(0, 8),
+      repeatY: +cardMat.normalMap.repeat.y.toFixed(3),
+      offsetY: +cardMat.normalMap.offset.y.toFixed(3),
+    } : null,
+    sameMapAndNormal: !!(cardMat && cardMat.map && cardMat.map === cardMat.normalMap),
+    // The card mesh may carry SEVERAL materials and only material[0] is ever
+    // given the injected texture and the flip, so list them all: a face drawn
+    // with a slot that was missed is exactly how a mirrored card can appear.
+    matCount: cardMesh ? (Array.isArray(cardMesh.material) ? cardMesh.material.length : 1) : 0,
+    mats: cardMesh ? (Array.isArray(cardMesh.material) ? cardMesh.material : [cardMesh.material]).map(function (mm, gi) {
+      return {
+        i: gi,
+        name: mm ? mm.name : null,
+        map: mm && mm.map ? ((mm.map.image && (mm.map.image.currentSrc || mm.map.image.src) || "").split("/").pop().slice(0, 24) || "baked") : null,
+        repeatY: mm && mm.map ? +mm.map.repeat.y.toFixed(3) : null,
+        offsetY: mm && mm.map ? +mm.map.offset.y.toFixed(3) : null,
+        isCardMat: mm === cardMat,
+      };
+    }) : [],
     vflip: FLIP_V,
     blur: !!worldRT,
     rt: worldRT ? [worldRT.width, worldRT.height] : null,
@@ -1635,6 +1773,10 @@ function submitContactForm(e) {
     })
     .catch(function (err) {
       console.warn("[contact] form failed:", err);
+      // Order matters only in that the specific flags come first. The last
+      // branch is the one that used to leak: a request that never produced a
+      // response has no status and no server message, so the visitor was shown
+      // the browser's own "Failed to fetch".
       if (err && err.noRelay) status.textContent = S.noRelay;
       else if (err && err.rateLimited) status.textContent = S.rateLimited;
       else if (err && err.noRoute) status.textContent = S.noRoute;
@@ -1665,7 +1807,9 @@ document.addEventListener("pointerdown", function (e) {
   spinY = 0;
   spinX = 0;
   idleTimer = 0;      // manipulation resets the idle auto-rotate clock
-  if (introFlip > 0) introFlip = 0; // grabbed mid-intro -> snap to the front
+  // mid-intro grab: keep the card exactly where it is and let the drag own it
+  // from here, rather than snapping the held-back face round to the front
+  absorbIntroFlip();
 });
 
 document.addEventListener("pointermove", function (e) {
