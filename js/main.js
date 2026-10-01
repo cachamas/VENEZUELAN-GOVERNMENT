@@ -1172,30 +1172,142 @@ function makeUnlit(gltf) {
 }
 
 // every layer that sits ON a wall — murals, stickers, graffiti, signs, screens,
-// labels, decals — lives within a hair of its surface and z-fights as the
-// camera moves; a negative polygon offset pins each one just in front of the
-// backdrop so it never flickers out of view. Any material that carries alpha
-// (transparency, opacity, an alpha map, or an alpha test) is treated as a
+// labels, decals — lives within a hair of its surface. Any material that carries
+// alpha (transparency, opacity, an alpha map, or an alpha test) is treated as a
 // layer; pure solid opaque surfaces are left untouched so depth order stays
 // authoritative. FLIES planes float free and are left alone.
+//
+// WHY THESE FLICKER, AND WHY THE OLD FIX DID NOT WORK
+//
+// In MAIN the wall is not a backdrop the decals sit in front of. Measured from
+// the GLB, the translucent wall slab occupies z[-0.2509 .. -0.0105] — 240 mm —
+// and the decals are INSIDE that band, not in front of it:
+//
+//   MURAL      z[-0.0747 .. -0.0665]   8 mm slab, fully inside the wall
+//   GRAFFITI1  z[-0.0645 .. -0.0640]   0.5 mm, fully inside the wall
+//   GRAFFITI2  z[-0.0599 .. -0.0594]   0.5 mm, fully inside the wall
+//
+// So the decal and the wall are interpenetrating transparent surfaces, and both
+// are alphaMode=BLEND. That put BOTH through isLayer here, so both received the
+// IDENTICAL polygonOffset(-1, -2). An offset applied equally to both members of
+// a pair cancels: the relative depth was left exactly as the geometry had it, so
+// the surfaces still fought, and because the fight is decided by depth
+// resolution against camera distance it flipped as the intro dolly moved in.
+// Deterministic, same camera position, every run - which is exactly how it
+// presents.
+//
+// Two things have to change, and the measurements further down show that
+// neither is sufficient alone:
+//
+//   1. DEPTH. The wall's front face sits 17mm in front of the mural, inside the
+//      same slab. While the wall writes depth the mural simply loses the depth
+//      test, and no polygon offset can bridge 17mm (units scale with the depth
+//      resolution, which at 1.5m and a 0.1-1000 range is microscopic). So
+//      depthWrite goes OFF on both. That is the correct configuration for
+//      alpha-blended surfaces anyway: they neither write depth nor occlude one
+//      another, and depthTest stays TRUE so opaque geometry — the ATM, the
+//      figures — still occludes them, which is the half that matters.
+//
+//   2. DRAW ORDER. With nothing writing depth, the only thing deciding who
+//      paints over whom is three.js's transparent sort, and that sorts by the
+//      DEPTH OF ONE ARBITRARY POINT PER MESH — the geometry's bounding-sphere
+//      centre. The mural is an 8.7-unit-wide panel centred at x=-0.06; each
+//      wall half is a 5.8-unit slab centred at x=-2.95 and x=+1.39. Those
+//      centres are nowhere near each other, so as the camera dollies in the
+//      comparison between them flips, and for a window of frames the wall
+//      sorts NEARER, draws LAST, and composites over the mural. That is the
+//      dropout. It cannot be fixed by tuning: the sort key is a property of the
+//      geometry, not of the relationship between the surfaces, so it has to be
+//      overridden — see TIER_BACKDROP / TIER_LAYER below.
+//
+// The backdrop is also excluded from the polygon offset rather than sharing it,
+// so a layer can no longer be cancelled out by the surface it is competing with.
+const BACKDROP_MAT = /^WALL/;
+// RENDER ORDER TIERS. three.js never reads a MATERIAL's renderOrder — only an
+// Object3D's (WebGLRenderList copies `object.renderOrder` into the render
+// item, and reversePainterSortStable compares that). So the tier has to be set
+// on the MESH, and a per-material assignment is silently a no-op. The two
+// values are only 0 and 1 because nothing else in the build sets an
+// Object3D.renderOrder, so the tiers cannot collide with a foreign ordering.
+const TIER_BACKDROP = 0;
+const TIER_LAYER = 1;
+
+// Of the two fixes below, BOTH are load-bearing - measured by holding the
+// camera at a pinned camT and differencing the frame against the same frame
+// with the MURAL hidden (so the bus, the smoke and the horror flicker cancel
+// out and only the mural's own contribution to the screen is left):
+//
+//   camT            12     13     13.5   13.75  14     14.5   15     18
+//   HEAD as-shipped 0.39   0.57   7.55   8.35   7.67   3.37   0.13   0.00
+//   depthWrite off  5.20   6.82   9.46   0.20   0.55  -0.27   4.18   3.48
+//   renderOrder     5.14   6.41   7.61   6.89   3.53   2.01   0.57   0.00
+//   BOTH            3.92   5.95   7.40   8.84   7.87   4.84   4.37   3.32
+//
+// (~0 = the mural is drawing nothing at all, i.e. it has vanished). Either one
+// on its own still drops out; together it holds across the whole intro. The
+// window matches the report: the dropout is at camT ~13.75-14.5, which is 14-15
+// seconds after the language is picked.
 function stabilizeDecals(gltf) {
-  let n = 0;
+  // Pass 1: does this scene have a backdrop at all? Only MAIN does. Scenes
+  // without one keep their existing depth behaviour untouched, so this is a
+  // change to one room rather than to every transparent surface in the build.
+  const backdrops = new Set();
+  gltf.scene.traverse(function (o) {
+    if (!o.isMesh) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    mats.forEach(function (m) {
+      if (m && BACKDROP_MAT.test(m.name || "")) backdrops.add(m);
+    });
+  });
+  const interpenetrating = backdrops.size > 0;
+
+  let layers = 0;
+  let pulled = 0;
+  let tiered = 0;
   gltf.scene.traverse(function (o) {
     if (!o.isMesh || /^FLIES/.test(o.name)) return;
     const mats = Array.isArray(o.material) ? o.material : [o.material];
+    // renderOrder lives on the mesh, so the tier is decided per mesh: a mesh
+    // carrying a WALL material is a backdrop, anything else that has an
+    // alpha-carrying material is a layer.
+    let isBackdrop = false;
+    let isLayer = false;
     mats.forEach(function (m) {
       if (!m) return;
+      if (backdrops.has(m)) { isBackdrop = true; return; }
       if (m.userData.stabilized) return;
-      const isLayer = !!(m.transparent || m.opacity < 1 || m.alphaMap || m.alphaTest > 0);
-      if (!isLayer) return;
+      if (m.transparent || m.opacity < 1 || m.alphaMap || m.alphaTest > 0) isLayer = true;
+    });
+
+    mats.forEach(function (m) {
+      if (!m || m.userData.stabilized) return;
+      if (backdrops.has(m)) {
+        // The reference surface. It must not occlude (depthWrite off) and it
+        // must sort BEFORE every decal.
+        m.polygonOffset = false;
+        if (interpenetrating) m.depthWrite = false;
+        pulled++;
+        return;
+      }
+      if (!(m.transparent || m.opacity < 1 || m.alphaMap || m.alphaTest > 0)) return;
       m.userData.stabilized = true;
+      // a decal layer: always sorted after the wall it is painted on
       m.polygonOffset = true;
       m.polygonOffsetFactor = -1;
-      m.polygonOffsetUnits = -2;
-      n++;
+      m.polygonOffsetUnits = -4;
+      if (interpenetrating) m.depthWrite = false;
+      layers++;
     });
+
+    if (!interpenetrating) return;
+    if (isBackdrop) o.renderOrder = TIER_BACKDROP;
+    else if (isLayer) o.renderOrder = TIER_LAYER;
+    else return;
+    tiered++;
   });
-  console.log("[decals] polygon offset on", n, "layer materials");
+  console.log("[decals]", layers, "layer materials,", pulled, "backdrops,",
+    tiered, "meshes tiered;",
+    interpenetrating ? "depth-write off (interpenetrating)" : "depth behaviour unchanged");
 }
 
 // camera framing: each scene shifts its authored camera in camera-local axes
@@ -6559,6 +6671,14 @@ function countMeshes(obj) {
 window.__viewer = {
   goToScene: goToScene,
   contact: function () { return contactDebug(); },
+  // Raw handles, for CDP harnesses. `sceneRoots` is what lets a harness
+  // replicate three.js's own transparent draw order (groupOrder, then
+  // Object3D.renderOrder, then bounding-sphere depth) instead of guessing at it
+  // from pixels — the mural dropouts in stabilizeDecals were only separable
+  // from a camera move that way. See muralsort.js / muralab.js.
+  THREE: THREE,
+  sceneRoots: scenes,
+  get camera() { return camera; },
   // The CONTACT card is the one thing on the site that renders in its OWN pass
   // over the room, and "it doesn't show" has therefore never been diagnosable
   // from a screenshot: the card's own state reports healthy whether or not a
