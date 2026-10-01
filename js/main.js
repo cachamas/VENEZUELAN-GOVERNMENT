@@ -1223,14 +1223,39 @@ function makeUnlit(gltf) {
 // The backdrop is also excluded from the polygon offset rather than sharing it,
 // so a layer can no longer be cancelled out by the surface it is competing with.
 const BACKDROP_MAT = /^WALL/;
+// scratch for ranking decals by depth at load time
+const _decalBox = new THREE.Box3();
+const _decalV = new THREE.Vector3();
 // RENDER ORDER TIERS. three.js never reads a MATERIAL's renderOrder — only an
 // Object3D's (WebGLRenderList copies `object.renderOrder` into the render
 // item, and reversePainterSortStable compares that). So the tier has to be set
-// on the MESH, and a per-material assignment is silently a no-op. The two
-// values are only 0 and 1 because nothing else in the build sets an
-// Object3D.renderOrder, so the tiers cannot collide with a foreign ordering.
+// on the MESH, and a per-material assignment is silently a no-op. The values
+// are low integers because nothing else in the build sets an
+// Object3D.renderOrder, so they cannot collide with a foreign ordering.
 const TIER_BACKDROP = 0;
+// First tier given to a decal. Decals are then spaced out from here by their
+// own depth — see TIER_Z_STEP.
 const TIER_LAYER = 1;
+// Decals share one wall, and three.js's remaining sort within a tier is the
+// DEPTH OF ONE ARBITRARY POINT PER MESH — the geometry's bounding-sphere
+// centre. On a flat wall that is the wrong point to compare. The mural is an
+// 8.7-unit panel centred at x=-0.06; GRAFFITI2 is a 1.3-unit patch centred at
+// x=-0.90, on the same plane. Their centres are ~0.9 units apart laterally, so
+// as the intro camera dollies in the two centres swap apparent depth and the
+// mural draws AFTER the graffiti painted on it — the big translucent panel then
+// composites straight over it.
+//
+// That is a second instance of the same class of bug the backdrop tiering
+// fixed, one level down: tiering the wall against the decals cannot help when
+// the decals fight among themselves. The fix is the same one — override the
+// sort — but the correct order is a property of the ARTWORK, not of the camera:
+// each decal's own depth into the wall, measured once at load, which is fixed
+// and cannot flip. Sorting the wall decals by that gives the painter's order
+// (farthest from the lens first) for every camera position, forever.
+const TIER_Z_STEP = 1;
+// z is quantised to this before being turned into a tier, so two decals a
+// fraction of a millimetre apart do not each get their own tier for no reason.
+const TIER_Z_QUANTUM = 0.0005;
 
 // Of the two fixes below, BOTH are load-bearing - measured by holding the
 // camera at a pinned camT and differencing the frame against the same frame
@@ -1263,7 +1288,7 @@ function stabilizeDecals(gltf) {
 
   let layers = 0;
   let pulled = 0;
-  let tiered = 0;
+  const decals = [];
   gltf.scene.traverse(function (o) {
     if (!o.isMesh || /^FLIES/.test(o.name)) return;
     const mats = Array.isArray(o.material) ? o.material : [o.material];
@@ -1300,13 +1325,41 @@ function stabilizeDecals(gltf) {
     });
 
     if (!interpenetrating) return;
-    if (isBackdrop) o.renderOrder = TIER_BACKDROP;
-    else if (isLayer) o.renderOrder = TIER_LAYER;
-    else return;
-    tiered++;
+    if (isBackdrop) { o.renderOrder = TIER_BACKDROP; return; }
+    if (isLayer) decals.push(o);
   });
+
+  // Order the decals among themselves by their own depth into the wall, taken
+  // once here in the scene's own space. The scene root has not been placed yet
+  // at load time, but that is irrelevant: the room is rigid, so every decal's
+  // depth RELATIVE to the others is the same now as it will ever be. Sorting
+  // that fixed order and giving each decal its own tier means the wall is
+  // always painted farthest-first, whatever the camera is doing.
+  //
+  // Ascending z is farthest-first here because MAIN's wall faces +z: the
+  // lens looks along -z, so a larger z is nearer the camera and must be
+  // painted LATER. Verified against the shipped geometry - GRAFFITIATM is
+  // deepest at z=-0.141, SIGN is the most proud at z=-0.048, and both are
+  // correct as drawn.
+  if (decals.length) {
+    // rank on the world z of each decal's bounding-box centre
+    const ranked = decals.map(function (o) {
+      _decalBox.setFromObject(o);
+      _decalBox.getCenter(_decalV);
+      return { o: o, z: +_decalV.z.toFixed(4) };
+    }).sort(function (a, b) { return a.z - b.z; });
+    // quantise, so decals effectively coplanar share a tier rather than each
+    // burning one and inflating the numbers
+    let tier = TIER_LAYER, lastZ = null;
+    ranked.forEach(function (e) {
+      if (lastZ === null || Math.abs(e.z - lastZ) > TIER_Z_QUANTUM) { tier += TIER_Z_STEP; lastZ = e.z; }
+      e.o.renderOrder = tier;
+    });
+    console.log("[decals] wall paint order (farthest first): " +
+      ranked.map(function (e) { return e.o.name + "@" + e.z; }).join(" "));
+  }
   console.log("[decals]", layers, "layer materials,", pulled, "backdrops,",
-    tiered, "meshes tiered;",
+    decals.length + 1, "meshes tiered;",
     interpenetrating ? "depth-write off (interpenetrating)" : "depth behaviour unchanged");
 }
 
